@@ -22,6 +22,7 @@ from threading import Thread
 from string import ascii_lowercase
 from random import choice
 from time import monotonic, sleep
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Tuple, Any
 
 from thingsboard_gateway.connectors.bacnet.constants import (
@@ -51,7 +52,7 @@ except ImportError:
 
 from bacpypes3.pdu import Address, IPv4Address
 from bacpypes3.primitivedata import Null, Real
-from bacpypes3.basetypes import DailySchedule, TimeValue, DeviceObjectPropertyReference, ObjectPropertyReference, PropertyIdentifier, ObjectIdentifier
+from bacpypes3.basetypes import DailySchedule, TimeValue, DeviceObjectPropertyReference, ObjectPropertyReference, PropertyIdentifier, ObjectIdentifier, Segmentation
 from thingsboard_gateway.connectors.bacnet.device import Device, Devices
 from thingsboard_gateway.connectors.bacnet.entities.device_object_config import DeviceObjectConfig
 from thingsboard_gateway.connectors.bacnet.application import Application
@@ -364,11 +365,14 @@ class AsyncBACnetConnector(Thread, Connector):
 
     async def __set_additional_device_info_to_apdu(self, apdu, device_config):
         if Device.need_to_retrieve_device_name(device_config):
+            fallback_device_name = apdu.deviceName if hasattr(apdu, 'deviceName') else None
             apdu.deviceName = None
             device_name = await self.__application.get_device_name(apdu.pduSource, apdu.iAmDeviceIdentifier)
 
             if device_name is not None:
                 apdu.deviceName = device_name
+            elif fallback_device_name is not None:
+                apdu.deviceName = fallback_device_name
 
         if Device.need_to_retrieve_router_info(device_config):
             try:
@@ -542,10 +546,197 @@ class AsyncBACnetConnector(Thread, Connector):
                     self.__log.error('Invalid address %s', device_config['address'])
                     continue
 
+                is_pattern_address = '*' in device_config['address'] or 'X' in device_config['address']
+                setup_without_discovery = self.__is_setup_without_discovery_enabled(device_config)
+
+                if setup_without_discovery and not is_pattern_address:
+                    self.__log.debug('setupWithoutDiscovery is enabled for device %s', device_config['address'])
+                    await self.__add_configured_device_without_iam(device_config)
+                    continue
+
+                if setup_without_discovery and is_pattern_address:
+                    self.__log.debug('setupWithoutDiscovery for pattern address %s is ignored. Falling back to WhoIs',
+                                     device_config['address'])
+
                 await self.__application.do_who_is(device_address=who_is_address)
                 self.__log.debug('WhoIs request sent to device %s', device_config['address'])
             except Exception as e:
                 self.__log.error('Error discovering device %s: %s', device_config['address'], e)
+
+    async def __add_configured_device_without_iam(self, device_config):
+        device_id = self.__get_explicit_device_id(device_config.get('deviceId'))
+        if device_id is None:
+            return
+
+        configured_address = device_config.get('address')
+        if configured_address is None:
+            return
+
+        if '*' in configured_address or 'X' in configured_address:
+            self.__log.debug('Skipping config-driven add for pattern address %s', configured_address)
+            return
+
+        try:
+            address = Address(configured_address)
+        except Exception as e:
+            self.__log.error('Invalid BACnet address in config %s: %s', configured_address, e)
+            return
+
+        device_unique_id = Devices.get_device_unique_id(str(address), device_id)
+        if len(await self.__devices.get_devices_by_id(device_unique_id)) > 0:
+            return
+
+        apdu = await self.__build_i_am_like_apdu(address, device_id, device_config)
+        if apdu is None:
+            return
+
+        self.__log.debug('Adding configured BACnet device by synthetic I-Am: %s (deviceId=%s)',
+                         configured_address,
+                         device_id)
+        await self.__add_device(apdu, device_config)
+
+    async def __build_i_am_like_apdu(self, address: Address, device_id: int, device_config: dict):
+        object_id = ('device', device_id)
+
+        device_name_from_config = self.__get_config_value(device_config, 'objectName')
+        vendor_id_from_config = self.__get_config_value(device_config, 'vendorID', 'vendorId', 'vendorIdentifier')
+        max_apdu_from_config = self.__get_config_value(device_config,
+                                                       'maxAPDULengthAccepted',
+                                                       'maxApduLengthAccepted')
+        segmentation_from_config = self.__get_config_value(device_config, 'segmentationSupported')
+
+        # Safe defaults used only when property probing and manual i-am values are unavailable.
+        # Use a conservative max APDU fallback to avoid oversized readPropertyMultiple batches.
+        vendor_id = self.__parse_int_or_default(vendor_id_from_config, 0)
+        max_apdu_length = self.__parse_int_or_default(max_apdu_from_config, 50)
+        segmentation_supported = self.__parse_segmentation_or_default(segmentation_from_config,
+                                                                      Segmentation.noSegmentation)
+        device_name = str(device_name_from_config if device_name_from_config is not None else device_id)
+
+        probe_succeeded = False
+
+        try:
+            if device_name_from_config is None:
+                object_name = await self.__application.read_property(address, object_id, 'objectName')
+                probe_succeeded = True
+                if object_name is not None:
+                    device_name = str(object_name)
+        except Exception:
+            pass
+
+        try:
+            if vendor_id_from_config is None:
+                vendor_identifier = await self.__application.read_property(address, object_id, 'vendorIdentifier')
+                probe_succeeded = True
+                if vendor_identifier is not None:
+                    vendor_id = int(vendor_identifier)
+        except Exception:
+            pass
+
+        try:
+            if max_apdu_from_config is None:
+                max_apdu = await self.__application.read_property(address, object_id, 'maxApduLengthAccepted')
+                probe_succeeded = True
+                if max_apdu is not None:
+                    max_apdu_length = int(max_apdu)
+        except Exception:
+            pass
+
+        try:
+            if segmentation_from_config is None:
+                segmentation = await self.__application.read_property(address, object_id, 'segmentationSupported')
+                probe_succeeded = True
+                if segmentation is not None:
+                    segmentation_supported = self.__parse_segmentation_or_default(segmentation, segmentation_supported)
+        except Exception:
+            pass
+
+        if not probe_succeeded:
+            self.__log.debug('Device %s (deviceId=%s) is being added from config defaults without discovery response',
+                             address, device_id)
+
+        return SimpleNamespace(
+            pduSource=address,
+            iAmDeviceIdentifier=object_id,
+            vendorID=vendor_id,
+            maxAPDULengthAccepted=max_apdu_length,
+            segmentationSupported=segmentation_supported,
+            deviceName=device_name
+        )
+
+    @staticmethod
+    def __get_explicit_device_id(device_id_config):
+        if isinstance(device_id_config, int):
+            return device_id_config
+
+        if isinstance(device_id_config, str):
+            stripped_device_id = device_id_config.strip()
+            if stripped_device_id.isdigit():
+                return int(stripped_device_id)
+
+        if isinstance(device_id_config, list) and len(device_id_config) == 1:
+            single_value = device_id_config[0]
+            if isinstance(single_value, int):
+                return single_value
+            if isinstance(single_value, str):
+                stripped_device_id = single_value.strip()
+                if stripped_device_id.isdigit():
+                    return int(stripped_device_id)
+
+        return None
+
+    @staticmethod
+    def __is_setup_without_discovery_enabled(device_config):
+        value = device_config.get('setupWithoutDiscovery', True)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() in ('1', 'true', 'yes', 'y', 'on')
+
+        return bool(value)
+
+    @staticmethod
+    def __get_config_value(config, *keys):
+        for key in keys:
+            if key in config:
+                return config.get(key)
+
+        return None
+
+    @staticmethod
+    def __parse_int_or_default(value, default):
+        if value is None:
+            return default
+
+        try:
+            return int(value)
+        except Exception:
+            return default
+
+    @staticmethod
+    def __parse_segmentation_or_default(value, default):
+        if value is None:
+            return default
+
+        if isinstance(value, Segmentation):
+            return value
+
+        try:
+            return Segmentation(value)
+        except Exception:
+            pass
+
+        value_str = str(value).strip()
+        if value_str:
+            try:
+                return Segmentation[value_str]
+            except Exception:
+                value_lower = value_str.lower()
+                for segmentation in Segmentation:
+                    if segmentation.name.lower() == value_lower:
+                        return segmentation
+
+        return default
 
     async def __main_loop(self):
         while not self.__stopped:

@@ -94,10 +94,19 @@ class AsyncBACnetUplinkConverter(AsyncBACnetConverter):
             try:
                 object_id, value_prop_id, _, value = value_obj
                 if isinstance(value, Exception) or isinstance(value, ErrorType):
+                    error_class = getattr(value, 'errorClass', None)
+                    error_code = getattr(value, 'errorCode', None)
                     self.__log.error("Error converting object with objectId: \"%s\", and propertyId: \"%s\". Error: %s",
                                      object_id,
                                      value_prop_id,
                                      value)
+                    if isinstance(value, ErrorType):
+                        self.__log.error("BACnet error details for objectId: \"%s\", propertyId: \"%s\". "
+                                         "errorClass: %s, errorCode: %s",
+                                         object_id,
+                                         value_prop_id,
+                                         error_class,
+                                         error_code)
                     continue
 
                 if isinstance(value, DateTime):

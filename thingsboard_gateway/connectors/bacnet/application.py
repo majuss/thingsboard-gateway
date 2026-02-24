@@ -209,11 +209,52 @@ class Application(NormalApplication, ForeignApplication):
 
         if not isinstance(result, ReadPropertyMultipleACK):
             self.__log.error("Invalid response type: %s", type(result))
+            fallback_result = await self.__read_single_object_with_fallback(device, object_list)
+            if fallback_result:
+                return fallback_result
             return []
 
         decoded_result = self.decode_tag_list(result, device.details.vendor_id)
 
         return decoded_result
+
+    async def __read_single_object_with_fallback(self, device, object_list):
+        if len(object_list) != 1:
+            return []
+
+        object_config = object_list[0]
+        try:
+            vendor_info = get_vendor_info(device.details.vendor_id)
+            object_id = object_config['objectId']
+            if not isinstance(object_id, ObjectIdentifier):
+                object_id = vendor_info.object_identifier(f"{object_config['objectType']},{object_id}")
+
+            properties = object_config['propertyId']
+            if not isinstance(properties, (set, list, tuple)):
+                properties = {properties}
+
+            fallback_result = []
+            for prop in properties:
+                property_identifier = vendor_info.property_identifier(prop)
+                property_value = await self.__send_request_wrapper(
+                    self.read_property,
+                    err_msg=f"Failed to read {object_id}:{property_identifier} in readProperty fallback",
+                    address=Address(device.details.address),
+                    objid=object_id,
+                    prop=property_identifier
+                )
+                if property_value is None:
+                    continue
+
+                fallback_result.append((object_id, property_identifier, None, property_value))
+
+            if fallback_result:
+                self.__log.debug("readProperty fallback succeeded for %s", object_id)
+
+            return fallback_result
+        except Exception as e:
+            self.__log.warning("readProperty fallback failed for object config %s: %s", object_config, e)
+            return []
 
     async def get_device_objects(self, device, with_all_properties=False, index_to_read=None):
         if device.details.is_segmentation_supported():
