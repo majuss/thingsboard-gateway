@@ -7,6 +7,9 @@
 !README.md
 !setup.py
 !requirements.txt
+!docker/
+!docker/Dockerfile
+!docker/start-gateway.sh
 
 # ignore on every level
 **/__pycache__/

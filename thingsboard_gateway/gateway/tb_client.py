@@ -31,6 +31,7 @@ import socks
 from simplejson import dumps, load
 
 from thingsboard_gateway.gateway.constants import DEV_MODE_PARAMETER_NAME, PROVISIONED_CREDENTIALS_FILENAME
+import thingsboard_gateway.sitecustomize  # noqa pylint: disable=unused-import
 from thingsboard_gateway.tb_utility.tb_utility import TBUtility
 
 try:
@@ -48,8 +49,9 @@ except ImportError:
             GATEWAY_ATTRIBUTES_RESPONSE_TOPIC, GATEWAY_ATTRIBUTES_TOPIC
         import tb_device_mqtt
     else:
-        print("tb-mqtt-client library not found - installing...")
-        TBUtility.install_package('tb-mqtt-client')
+        if TBUtility.get_package_version('tb-mqtt-client') is None:
+            print("tb-mqtt-client library not found - installing...")
+            TBUtility.install_package('tb-mqtt-client')
         from tb_gateway_mqtt import TBGatewayMqttClient, TBDeviceMqttClient, \
             GATEWAY_ATTRIBUTES_RESPONSE_TOPIC, GATEWAY_ATTRIBUTES_TOPIC
         import tb_device_mqtt

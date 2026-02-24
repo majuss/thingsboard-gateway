@@ -297,12 +297,22 @@ class TBUtility:
 
     @staticmethod
     def get_package_version(package):
-        from pkg_resources import get_distribution
         current_package_version = None
+
         try:
-            current_package_version = get_distribution(package)
+            from importlib import metadata
+
+            current_package_version = metadata.version(package)
         except Exception:
-            pass
+            # Fall back to pkg_resources for older environments.
+            try:
+                from pkg_resources import get_distribution
+
+                distribution = get_distribution(package)
+                current_package_version = str(getattr(distribution, 'version', distribution))
+            except Exception:
+                pass
+
         return current_package_version
 
     @staticmethod
