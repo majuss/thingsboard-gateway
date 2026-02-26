@@ -54,8 +54,8 @@ class DeviceObjectConfig:
             address = address.rstrip('/')
         if 'mask' in config:
             network_mask = config.pop('mask', None)
-            if network_mask:
-                address += '/' + network_mask
+            if network_mask is not None:
+                address += '/' + str(network_mask)
         if 'port' in config:
             address += ':' + str(config.pop('port', 47808))
         config['address'] = address

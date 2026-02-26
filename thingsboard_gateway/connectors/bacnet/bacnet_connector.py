@@ -271,23 +271,21 @@ class AsyncBACnetConnector(Thread, Connector):
             )
             app['maxApduLengthAccepted'] = 1476
 
-        mask = app.get('mask', "24")
+        mask = app.get('mask', 24)
         try:
-            if mask.isdigit():
-                mask_int = int(mask)
-                if not (0 <= mask_int <= 32):
-                    self.__log.warning(
-                        "The mask inside application section must be in range [0, 32], but got %s. Using default 24",
-                        mask)
-                    app['mask'] = "24"
-                else:
-                    app['mask'] = mask  # valid number string
+            if not isinstance(mask, int):
+                raise TypeError("mask must be int")
+
+            if not (0 <= mask <= 32):
+                self.__log.warning(
+                    "The mask inside application section must be in range [0, 32], but got %s. Using default 24",
+                    mask)
+                app['mask'] = 24
             else:
-                # Check if it's a valid dotted mask like 255.255.255.0
-                IPv4Network(f"{host}/{mask}", strict=False)
+                app['mask'] = mask
             return True
         except Exception as e:
-            app['mask'] = "24"
+            app['mask'] = 24
             self.__log.warning("Invalid subnet mask inside application section: %s : %s using default - 24", mask,
                                str(e))
 
