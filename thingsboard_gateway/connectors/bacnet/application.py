@@ -328,9 +328,14 @@ class Application(NormalApplication, ForeignApplication):
         """
         Read multiple device-object properties in a single ReadPropertyMultiple request.
         Returns a dict mapping property name -> value for properties that were successfully read.
+        The returned keys match the original property_names (camelCase) passed by the caller.
         Falls back to individual ReadProperty calls if RPM fails.
         """
         result = {}
+
+        # Build a lookup from kebab-case (as returned by bacpypes3) back to the original
+        # camelCase names the caller used, so the returned dict keys match the caller's expectations.
+        kebab_to_original = {str(PropertyIdentifier(p)): p for p in property_names}
 
         try:
             property_references = [PropertyIdentifier(p) for p in property_names]
@@ -353,7 +358,8 @@ class Application(NormalApplication, ForeignApplication):
                 for read_access_result in rpm_result.listOfReadAccessResults:
                     for element in read_access_result.listOfResults:
                         try:
-                            prop_id = str(element.propertyIdentifier)
+                            kebab_name = str(element.propertyIdentifier)
+                            original_name = kebab_to_original.get(kebab_name, kebab_name)
                             read_result = element.readResult
                             if read_result.propertyAccessError:
                                 continue
@@ -364,7 +370,7 @@ class Application(NormalApplication, ForeignApplication):
                             property_type = object_class.get_property_type(element.propertyIdentifier)
                             if property_type is not None:
                                 value = read_result.propertyValue.cast_out(property_type)
-                                result[prop_id] = value
+                                result[original_name] = value
                         except Exception as e:
                             self.__log.debug("Failed to decode probed property %s: %s",
                                              element.propertyIdentifier, e)
