@@ -324,6 +324,71 @@ class Application(NormalApplication, ForeignApplication):
 
         return device_name
 
+    async def probe_device_properties(self, address: Address, object_id, property_names: list) -> dict:
+        """
+        Read multiple device-object properties in a single ReadPropertyMultiple request.
+        Returns a dict mapping property name -> value for properties that were successfully read.
+        Falls back to individual ReadProperty calls if RPM fails.
+        """
+        result = {}
+
+        try:
+            property_references = [PropertyIdentifier(p) for p in property_names]
+            ras = ReadAccessSpecification(
+                objectIdentifier=ObjectIdentifier(f"device,{object_id[1]}" if isinstance(object_id, tuple) else object_id),
+                listOfPropertyReferences=property_references,
+            )
+            request = ReadPropertyMultipleRequest(
+                listOfReadAccessSpecs=SequenceOf(ReadAccessSpecification)([ras]),
+                destination=Address(str(address)),
+            )
+
+            rpm_result = await self.__send_request_wrapper(
+                self.request,
+                err_msg=f"Failed to probe device properties via RPM for {address}",
+                apdu=request
+            )
+
+            if isinstance(rpm_result, ReadPropertyMultipleACK):
+                for read_access_result in rpm_result.listOfReadAccessResults:
+                    for element in read_access_result.listOfResults:
+                        try:
+                            prop_id = str(element.propertyIdentifier)
+                            read_result = element.readResult
+                            if read_result.propertyAccessError:
+                                continue
+                            vendor_info = get_vendor_info(0)
+                            object_class = vendor_info.get_object_class(ObjectIdentifier(
+                                f"device,{object_id[1]}" if isinstance(object_id, tuple) else object_id
+                            )[0])
+                            property_type = object_class.get_property_type(element.propertyIdentifier)
+                            if property_type is not None:
+                                value = read_result.propertyValue.cast_out(property_type)
+                                result[prop_id] = value
+                        except Exception as e:
+                            self.__log.debug("Failed to decode probed property %s: %s",
+                                             element.propertyIdentifier, e)
+                return result
+        except Exception as e:
+            self.__log.debug("RPM probe failed for %s, falling back to individual reads: %s", address, e)
+
+        # Fallback: read properties individually
+        for prop_name in property_names:
+            try:
+                value = await self.__send_request_wrapper(
+                    self.read_property,
+                    err_msg=f"Failed to probe {prop_name} for {address}",
+                    address=address,
+                    objid=object_id,
+                    prop=prop_name
+                )
+                if value is not None:
+                    result[prop_name] = value
+            except Exception:
+                pass
+
+        return result
+
     async def get_router_info(self, device_address: Address):
         router_info = {}
 

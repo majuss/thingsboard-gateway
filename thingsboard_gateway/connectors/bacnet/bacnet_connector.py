@@ -210,10 +210,12 @@ class AsyncBACnetConnector(Thread, Connector):
     async def __rescan_devices(self):
         while not self.__stopped:
             try:
-                device = self.__process_device_rescan_queue.get_nowait()
+                device = await asyncio.wait_for(
+                    self.__process_device_rescan_queue.get(), timeout=1.0
+                )
                 self.loop.create_task(self.__rescan(device))
-            except QueueEmpty:
-                await asyncio.sleep(.1)
+            except TimeoutError:
+                pass
 
     async def __start(self):
         if not self.__is_valid_application_device_section():
@@ -531,6 +533,14 @@ class AsyncBACnetConnector(Thread, Connector):
 
             device.config = new_config
 
+    async def __run_discovery(self):
+        try:
+            await self.__discover_devices()
+        except Exception as e:
+            self.__log.error('Error during device discovery: %s', e)
+        finally:
+            self.__discovery_in_progress = False
+
     async def __discover_devices(self):
         self.__previous_discover_time = monotonic()
         self.__log.info('Discovering devices...')
@@ -606,50 +616,45 @@ class AsyncBACnetConnector(Thread, Connector):
         segmentation_from_config = self.__get_config_value(device_config, 'segmentationSupported')
 
         # Safe defaults used only when property probing and manual i-am values are unavailable.
-        # Use a conservative max APDU fallback to avoid oversized readPropertyMultiple batches.
+        # Use 300 as default — enough for typical BACnet/MSTP and sufficient to batch
+        # multiple objects per ReadPropertyMultiple request.
         vendor_id = self.__parse_int_or_default(vendor_id_from_config, 0)
-        max_apdu_length = self.__parse_int_or_default(max_apdu_from_config, 50)
+        max_apdu_length = self.__parse_int_or_default(max_apdu_from_config, 300)
         segmentation_supported = self.__parse_segmentation_or_default(segmentation_from_config,
                                                                       Segmentation.noSegmentation)
         device_name = str(device_name_from_config if device_name_from_config is not None else device_id)
 
+        # Collect which properties need to be probed from the device
+        properties_to_probe = []
+        if device_name_from_config is None:
+            properties_to_probe.append('objectName')
+        if vendor_id_from_config is None:
+            properties_to_probe.append('vendorIdentifier')
+        if max_apdu_from_config is None:
+            properties_to_probe.append('maxApduLengthAccepted')
+        if segmentation_from_config is None:
+            properties_to_probe.append('segmentationSupported')
+
         probe_succeeded = False
 
-        try:
-            if device_name_from_config is None:
-                object_name = await self.__application.read_property(address, object_id, 'objectName')
-                probe_succeeded = True
-                if object_name is not None:
-                    device_name = str(object_name)
-        except Exception:
-            pass
+        if properties_to_probe:
+            probed_values = await self.__application.probe_device_properties(
+                address, object_id, properties_to_probe
+            )
 
-        try:
-            if vendor_id_from_config is None:
-                vendor_identifier = await self.__application.read_property(address, object_id, 'vendorIdentifier')
+            if probed_values:
                 probe_succeeded = True
-                if vendor_identifier is not None:
-                    vendor_id = int(vendor_identifier)
-        except Exception:
-            pass
 
-        try:
-            if max_apdu_from_config is None:
-                max_apdu = await self.__application.read_property(address, object_id, 'maxApduLengthAccepted')
-                probe_succeeded = True
-                if max_apdu is not None:
-                    max_apdu_length = int(max_apdu)
-        except Exception:
-            pass
-
-        try:
-            if segmentation_from_config is None:
-                segmentation = await self.__application.read_property(address, object_id, 'segmentationSupported')
-                probe_succeeded = True
-                if segmentation is not None:
-                    segmentation_supported = self.__parse_segmentation_or_default(segmentation, segmentation_supported)
-        except Exception:
-            pass
+                if 'objectName' in probed_values:
+                    device_name = str(probed_values['objectName'])
+                if 'vendorIdentifier' in probed_values:
+                    vendor_id = int(probed_values['vendorIdentifier'])
+                if 'maxApduLengthAccepted' in probed_values:
+                    max_apdu_length = int(probed_values['maxApduLengthAccepted'])
+                if 'segmentationSupported' in probed_values:
+                    segmentation_supported = self.__parse_segmentation_or_default(
+                        probed_values['segmentationSupported'], segmentation_supported
+                    )
 
         if not probe_succeeded:
             self.__log.debug('Device %s (deviceId=%s) is being added from config defaults without discovery response',
@@ -739,13 +744,16 @@ class AsyncBACnetConnector(Thread, Connector):
         return default
 
     async def __main_loop(self):
+        self.__discovery_in_progress = False
+
         while not self.__stopped:
             try:
-                if monotonic() - self.__previous_discover_time >= self.__devices_discover_period:
-                    await self.__discover_devices()
+                if (not self.__discovery_in_progress
+                        and monotonic() - self.__previous_discover_time >= self.__devices_discover_period):
+                    self.__discovery_in_progress = True
+                    self.loop.create_task(self.__run_discovery())
             except Exception as e:
                 self.__log.error('Error in main loop during discovering devices: %s', e)
-                await asyncio.sleep(1)
 
             drained = False
             while True:
