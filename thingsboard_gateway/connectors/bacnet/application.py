@@ -12,7 +12,7 @@
 #     See the License for the specific language governing permissions and
 #     limitations under the License.
 
-from asyncio import Queue, QueueEmpty, sleep
+from asyncio import Queue, wait_for
 from typing import List
 from bacpypes3.ipv4.app import NormalApplication, ForeignApplication
 from bacpypes3.local.device import DeviceObject
@@ -92,22 +92,22 @@ class Application(NormalApplication, ForeignApplication):
     async def confirmation_handler(self):
         while not self.__stopped:
             try:
-                apdu = self.__confirmation_queue.get_nowait()
+                apdu = await wait_for(self.__confirmation_queue.get(), timeout=1.0)
 
                 if apdu.pduSource is None:
                     self.__log.warning("Received APDU without source address: %s", apdu)
-                    return
+                    continue
 
                 pdu_source = apdu.pduSource
                 if pdu_source not in self._requests:
-                    return
+                    continue
 
                 requests = self._requests[pdu_source]
                 for indx, (request, future) in enumerate(requests):
                     if request.apduInvokeID == apdu.apduInvokeID:
                         break
                 else:
-                    return
+                    continue
 
                 if isinstance(apdu, (SimpleAckPDU, ComplexAckPDU)):
                     future.set_result(apdu)
@@ -115,8 +115,8 @@ class Application(NormalApplication, ForeignApplication):
                     future.set_exception(apdu)
                 else:
                     raise TypeError("apdu")
-            except QueueEmpty:
-                await sleep(0.1)
+            except TimeoutError:
+                pass
             except Exception as e:
                 self.__log.error("APDU confirmation error: %s", e)
 

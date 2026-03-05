@@ -747,19 +747,25 @@ class AsyncBACnetConnector(Thread, Connector):
                 self.__log.error('Error in main loop during discovering devices: %s', e)
                 await asyncio.sleep(1)
 
-            try:
-                device: Device = self.__process_device_queue.get_nowait()
-                if device.stopped:
-                    self.__log.trace('Device %s stopped', device)
-                    continue
+            drained = False
+            while True:
+                try:
+                    device: Device = self.__process_device_queue.get_nowait()
+                    if device.stopped:
+                        self.__log.trace('Device %s stopped', device)
+                        continue
 
-                self.__log.info('Reading data from device %s...', device.details.address)
-                self.loop.create_task(self.__read_multiple_properties(device))
-                # TODO: Add handling for device activity/inactivity
-            except QueueEmpty:
+                    self.__log.info('Reading data from device %s...', device.details.address)
+                    self.loop.create_task(self.__read_multiple_properties(device))
+                    drained = True
+                except QueueEmpty:
+                    break
+                except Exception as e:
+                    self.__log.error('Error processing device requests: %s', e)
+                    break
+
+            if not drained:
                 await asyncio.sleep(.1)
-            except Exception as e:
-                self.__log.error('Error processing device requests: %s', e)
 
     async def __read_multiple_properties(self, device):
         reading_started = monotonic()
@@ -869,26 +875,30 @@ class AsyncBACnetConnector(Thread, Connector):
     async def __convert_data(self):
         while not self.__stopped:
             try:
-                device, config, values = self.__data_to_convert_queue.get_nowait()
+                device, config, values = await asyncio.wait_for(
+                    self.__data_to_convert_queue.get(), timeout=1.0
+                )
                 self.__log.trace('%s data to convert: %s', device, values)
 
                 converted_data = device.uplink_converter.convert(config, values)
                 self.__data_to_save_queue.put_nowait((device, converted_data))
-            except QueueEmpty:
-                await asyncio.sleep(.1)
+            except TimeoutError:
+                pass
             except Exception as e:
                 self.__log.error('Error converting data: %s', e)
 
     async def __save_data(self):
         while not self.__stopped:
             try:
-                device, data_to_save = self.__data_to_save_queue.get_nowait()
+                device, data_to_save = await asyncio.wait_for(
+                    self.__data_to_save_queue.get(), timeout=1.0
+                )
                 self.__log.trace('%s data to save: %s', device, data_to_save)
                 StatisticsService.count_connector_message(self.get_name(), stat_parameter_name='storageMsgPushed')
                 self.__gateway.send_to_storage(self.get_name(), self.get_id(), data_to_save)
                 self.statistics[STATISTIC_MESSAGE_SENT_PARAMETER] += 1
-            except QueueEmpty:
-                await asyncio.sleep(.1)
+            except TimeoutError:
+                pass
             except Exception as e:
                 self.__log.error('Error saving data: %s', e)
 
