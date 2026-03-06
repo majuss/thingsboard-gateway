@@ -236,13 +236,22 @@ class AsyncBACnetConnector(Thread, Connector):
             self.__application = Application(DeviceObjectConfig(
                 self.__config['application']), self.__handle_indication, self.__log)
 
-        await self.__discover_devices()
-        await asyncio.gather(self.__main_loop(),
+        await asyncio.gather(self.__initial_discovery_then_main_loop(),
                              self.__rescan_devices(),
                              self.__convert_data(),
                              self.__save_data(),
                              self.indication_callback(),
                              self.__application.confirmation_handler())
+
+    async def __initial_discovery_then_main_loop(self):
+        """Run initial device discovery first, then enter the main polling loop.
+        This runs inside asyncio.gather so confirmation_handler is active
+        and can resolve BACnet responses during property probing."""
+        try:
+            await self.__discover_devices()
+        except Exception as e:
+            self.__log.error('Error during initial device discovery: %s', e)
+        await self.__main_loop()
 
     def __is_valid_application_device_section(self) -> bool:
         app = self.__config.get('application')

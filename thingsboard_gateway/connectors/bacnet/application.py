@@ -324,18 +324,46 @@ class Application(NormalApplication, ForeignApplication):
 
         return device_name
 
-    async def probe_device_properties(self, address: Address, object_id, property_names: list) -> dict:
+    async def probe_device_properties(self, address: Address, object_id, property_names: list,
+                                       timeout: float = 10.0) -> dict:
         """
         Read multiple device-object properties in a single ReadPropertyMultiple request.
         Returns a dict mapping property name -> value for properties that were successfully read.
         The returned keys match the original property_names (camelCase) passed by the caller.
         Falls back to individual ReadProperty calls if RPM fails.
+        The entire probe is guarded by a timeout (default 10s) to avoid hanging
+        if the device does not respond.
         """
         result = {}
 
         # Build a lookup from kebab-case (as returned by bacpypes3) back to the original
         # camelCase names the caller used, so the returned dict keys match the caller's expectations.
         kebab_to_original = {str(PropertyIdentifier(p)): p for p in property_names}
+
+        try:
+            result = await wait_for(
+                self.__probe_device_properties_impl(address, object_id, property_names, kebab_to_original),
+                timeout=timeout
+            )
+        except TimeoutError:
+            self.__log.warning("Probe timed out after %.1fs for %s — device did not respond", timeout, address)
+        except Exception as e:
+            self.__log.warning("Probe failed for %s: %s", address, e)
+
+        # Log which properties were successfully read and which are missing
+        probed = set(result.keys())
+        missing = set(property_names) - probed
+        if probed:
+            self.__log.info("Probed device %s — read: %s", address, ', '.join(sorted(probed)))
+        if missing:
+            self.__log.info("Probed device %s — missing (using defaults): %s", address, ', '.join(sorted(missing)))
+        if not probed:
+            self.__log.warning("Probed device %s — could not read any properties, using all defaults", address)
+
+        return result
+
+    async def __probe_device_properties_impl(self, address, object_id, property_names, kebab_to_original):
+        result = {}
 
         try:
             property_references = [PropertyIdentifier(p) for p in property_names]
@@ -362,6 +390,7 @@ class Application(NormalApplication, ForeignApplication):
                             original_name = kebab_to_original.get(kebab_name, kebab_name)
                             read_result = element.readResult
                             if read_result.propertyAccessError:
+                                self.__log.debug("Property %s returned access error for %s", original_name, address)
                                 continue
                             vendor_info = get_vendor_info(0)
                             object_class = vendor_info.get_object_class(ObjectIdentifier(
@@ -375,11 +404,16 @@ class Application(NormalApplication, ForeignApplication):
                             self.__log.debug("Failed to decode probed property %s: %s",
                                              element.propertyIdentifier, e)
                 return result
+            else:
+                self.__log.debug("RPM probe returned non-ACK (%s) for %s, falling back to individual reads",
+                                 type(rpm_result).__name__, address)
         except Exception as e:
             self.__log.debug("RPM probe failed for %s, falling back to individual reads: %s", address, e)
 
         # Fallback: read properties individually
         for prop_name in property_names:
+            if prop_name in result:
+                continue
             try:
                 value = await self.__send_request_wrapper(
                     self.read_property,
