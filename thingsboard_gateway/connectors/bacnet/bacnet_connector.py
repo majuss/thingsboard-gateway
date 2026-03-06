@@ -805,7 +805,7 @@ class AsyncBACnetConnector(Thread, Connector):
         reading_ended = monotonic()
         current_reading_time = reading_ended - reading_started
 
-        self.__log.info('Reading cycle complete for device %s (%s) — %d objects read in %.3fs',
+        self.__log.debug('Reading cycle complete for device %s (%s) — %d objects read in %.3fs',
                         device.name, device.details.address,
                         len(device.uplink_converter_config.objects_to_read),
                         current_reading_time)
@@ -813,7 +813,7 @@ class AsyncBACnetConnector(Thread, Connector):
         self.__active_reads -= 1
         if self.__active_reads == 0:
             total_cycle_time = reading_ended - self.__poll_cycle_start
-            self.__log.info('=== Poll cycle complete — all devices read in %.3fs ===', total_cycle_time)
+            self.__log.debug('=== Poll cycle complete — all devices read in %.3fs ===', total_cycle_time)
 
         if current_reading_time > device.poll_period:
             device.poll_period = current_reading_time
