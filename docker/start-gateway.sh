@@ -12,4 +12,4 @@ if [ ! -f "$FIRSTLAUNCH" ]; then
     echo "# Delete this file to recreate default config files (will overwrite)." > "$FIRSTLAUNCH"
 fi
 
-exec python /thingsboard_gateway/tb_gateway.py
+exec env PYTHONPATH=/ python /thingsboard_gateway/tb_gateway.py

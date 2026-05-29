@@ -2,7 +2,7 @@
 # Hardened thingsboard-gateway image: BACnet-only, no RemoteShell, no RemoteConfig, no inbound RPCs.
 
 # --- Stage 1: builder -------------------------------------------------------
-FROM python:3.12-slim-bookworm AS builder
+FROM python:3.14-slim-bookworm AS builder
 
 ARG TARGETPLATFORM
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
@@ -31,7 +31,7 @@ RUN pip install --upgrade pip setuptools wheel \
     && pip wheel --wheel-dir /wheels -r requirements.txt
 
 # --- Stage 2: runtime -------------------------------------------------------
-FROM python:3.12-slim-bookworm AS runtime
+FROM python:3.14-slim-bookworm AS runtime
 
 ARG APP_UID=10001
 ARG APP_GID=10001
