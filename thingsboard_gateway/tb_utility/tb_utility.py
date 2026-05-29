@@ -257,43 +257,12 @@ class TBUtility:
 
     @staticmethod
     def install_package(package, version="upgrade", force_install=False):
-        from sys import executable, prefix, base_prefix, modules
-        from subprocess import check_call
-        import site
-        from importlib import reload
-
-        result = False
-        installation_sign = "==" if ">=" not in version else ""
-
-        if prefix != base_prefix:
-            if force_install:
-                result = check_call([executable, '-m', 'pip', 'install', package + '==' + version, '--force-reinstall'])
-            elif version.lower() == "upgrade":
-                result = check_call([executable, "-m", "pip", "install", package, "--upgrade"])
-            else:
-                if TBUtility.get_package_version(package) is None:
-                    result = check_call([executable, "-m", "pip", "install", package + installation_sign + version])
-        else:
-            if force_install:
-                result = check_call(
-                    [executable, '-m', 'pip', 'install', package + '==' + version, '--force-reinstall', "--user"])
-            elif version.lower() == "upgrade":
-                result = check_call([executable, "-m", "pip", "install", package, "--upgrade", "--user"])
-            else:
-                if TBUtility.get_package_version(package) is None:
-                    result = check_call(
-                        [executable, "-m", "pip", "install", package + installation_sign + version, "--user"])
-
-        # Because `pip` is running in a subprocess the newly installed modules and libraries are
-        # not immediately available to the current runtime.
-        # Refreshing sys.path fixes this. See:
-        # https://stackoverflow.com/questions/4271494/what-sets-up-sys-path-with-python-and-when
-        reload(site)
-        reload(site)
-        if package in modules:
-            del modules[package]
-
-        return result
+        # Hardened build: runtime pip installs are disabled. All dependencies must be
+        # baked into the image; attempts to install at runtime are a supply-chain risk.
+        raise RuntimeError(
+            "install_package is disabled in the hardened thingsboard-gateway build "
+            "(refused: package=%r version=%r force=%s)" % (package, version, force_install)
+        )
 
     @staticmethod
     def get_package_version(package):

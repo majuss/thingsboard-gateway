@@ -2,11 +2,9 @@
   "thingsboard": {
     "host": "thingsboard.cloud",
     "port": 1883,
-    "remoteShell": false,
-    "remoteConfiguration": true,
     "latencyDebugMode": false,
     "statistics": {
-      "enable": true,
+      "enable": false,
       "statsSendPeriodInSeconds": 60,
       "customStatsSendPeriodInSeconds": 3600
     },
@@ -21,7 +19,7 @@
     "handleDeviceRenaming": true,
     "security": {
       "type": "accessToken",
-      "accessToken": "YOUR_ACCESS_TOKEN"
+      "accessToken": "REPLACE_VIA_ENV_TB_GW_ACCESS_TOKEN"
     },
     "qos": 1,
     "reportStrategy": {
@@ -51,15 +49,11 @@
     "messages_ttl_check_in_hours": 1,
     "messages_ttl_in_days": 7
   },
-  "grpc": {
-    "enabled": false,
-    "serverPort": 9595,
-    "keepAliveTimeMs": 10001,
-    "keepAliveTimeoutMs": 5000,
-    "keepAlivePermitWithoutCalls": true,
-    "maxPingsWithoutData": 0,
-    "minTimeBetweenPingsMs": 10000,
-    "minPingIntervalWithoutDataMs": 5000
-  },
-  "connectors": []
+  "connectors": [
+    {
+      "name": "BACnet Connector",
+      "type": "bacnet",
+      "configuration": "bacnet.json"
+    }
+  ]
 }

@@ -30,7 +30,6 @@ from sys import argv, executable, stdin, stdout, stderr
 from threading import RLock, Thread, main_thread, current_thread, Event
 from time import sleep, time, monotonic
 from typing import Union, List
-from importlib.util import spec_from_file_location, module_from_spec
 from simplejson import JSONDecodeError, dumps, load, loads
 from yaml import safe_load
 
@@ -40,7 +39,7 @@ from thingsboard_gateway.gateway.constants import DEFAULT_CONNECTORS, CONNECTED_
     PERSISTENT_GRPC_CONNECTORS_KEY_FILENAME, RENAMING_PARAMETER, CONNECTOR_NAME_PARAMETER, DEVICE_TYPE_PARAMETER, \
     CONNECTOR_ID_PARAMETER, ATTRIBUTES_FOR_REQUEST, CONFIG_VERSION_PARAMETER, CONFIG_SECTION_PARAMETER, \
     DEBUG_METADATA_TEMPLATE_SIZE, SEND_TO_STORAGE_TS_PARAMETER, DATA_RETRIEVING_STARTED, ReportStrategy, \
-    REPORT_STRATEGY_PARAMETER, DEFAULT_STATISTIC, DEFAULT_DEVICE_FILTER, CUSTOM_RPC_DIR, DISCONNECTED_PARAMETER, \
+    REPORT_STRATEGY_PARAMETER, DEFAULT_STATISTIC, DEFAULT_DEVICE_FILTER, DISCONNECTED_PARAMETER, \
     PROVISIONED_CREDENTIALS_FILENAME
 from thingsboard_gateway.gateway.device_filter import DeviceFilter
 from thingsboard_gateway.gateway.entities.converted_data import ConvertedData
@@ -55,28 +54,22 @@ from thingsboard_gateway.gateway.tb_client import TBClient
 from thingsboard_gateway.storage.file.file_event_storage import FileEventStorage
 from thingsboard_gateway.storage.memory.memory_event_storage import MemoryEventStorage
 from thingsboard_gateway.storage.sqlite.sqlite_event_storage import SQLiteEventStorage
-from thingsboard_gateway.tb_utility.tb_gateway_remote_configurator import RemoteConfigurator
 from thingsboard_gateway.tb_utility.tb_handler import TBRemoteLoggerHandler
 from thingsboard_gateway.tb_utility.tb_loader import TBModuleLoader
 from thingsboard_gateway.tb_utility.tb_logger import TbLogger
-from thingsboard_gateway.tb_utility.tb_remote_shell import RemoteShell
 from thingsboard_gateway.tb_utility.tb_updater import TBUpdater
 from thingsboard_gateway.tb_utility.tb_utility import TBUtility
 
+# Hardened build: RemoteShell, RemoteConfigurator and gRPC server removed.
 GRPC_LOADED = False
-try:
-    from thingsboard_gateway.gateway.grpc_service.grpc_connector import GrpcConnector
-    from thingsboard_gateway.gateway.grpc_service.tb_grpc_manager import TBGRPCServerManager
-
-    GRPC_LOADED = True
-except ImportError:
-
-    class GrpcConnector:
-        pass
 
 
-    class TBGRPCServerManager:
-        pass
+class GrpcConnector:
+    pass
+
+
+class TBGRPCServerManager:
+    pass
 
 logging.setLoggerClass(TbLogger)
 log: TbLogger = None  # type: ignore
@@ -205,7 +198,6 @@ class TBGatewayService:
                                                    target=self.__send_to_storage)
         self.__save_converted_data_thread.start()
 
-        self.init_remote_shell(self.__config["thingsboard"].get("remoteShell"))
         self.__rpc_processing_thread = Thread(target=self.__send_rpc_reply_processing, daemon=True,
                                               name="RPC processing thread")
         self.__rpc_processing_thread.start()
@@ -243,8 +235,6 @@ class TBGatewayService:
 
         self._watchers_thread = Thread(target=self._watchers, name='Watchers', daemon=True)
         self._watchers_thread.start()
-
-        self.__init_remote_configuration()
 
         if self.__connectors_not_found:
             self.connectors_configs = {}
@@ -299,18 +289,15 @@ class TBGatewayService:
         self.__device_filter_config = None
         self.__device_filter = None
         self.__grpc_manager = None
-        self.__remote_shell = None
         self.__statistics = None
         self.__statistics_service = None
         self.__grpc_config = None
         self.__grpc_connectors = None
         self.__grpc_manager = None
-        self.__remote_configurator = None
         self.tb_client = None
         self.__requested_config_after_connect = False
         self.__rpc_reply_sent = False
         self.__subscribed_to_rpc_topics = False
-        self.__rpc_remote_shell_command_in_progress = None
         self.connectors_configs = {}
         self.__scheduled_rpc_calls = []
         self.__rpc_requests_in_progress = {}
@@ -346,21 +333,8 @@ class TBGatewayService:
             "file": FileEventStorage,
             "sqlite": SQLiteEventStorage,
         }
-        self.__gateway_rpc_methods = {
-            "ping": self.__rpc_ping,
-            "stats": self.__form_statistics,
-            "devices": self.__rpc_devices,
-            "update": self.__rpc_update,
-            "version": self.__rpc_version,
-            "device_renamed": self.__process_renamed_gateway_devices,
-            "device_deleted": self.__process_deleted_gateway_devices,
-            "remove_provisioned_credentials": self.__process_remove_provisioned_credentials,
-        }
-        self.load_custom_rpc_methods(CUSTOM_RPC_DIR)
-        self.__rpc_scheduled_methods_functions = {
-            "restart": {"function": self.restart_program, "arguments": ()},
-            "reboot": {"function": subprocess.call, "arguments": (["shutdown", "-r", "-t", "0"],)},
-        }
+        self.__gateway_rpc_methods = {}
+        self.__rpc_scheduled_methods_functions = {}
         self.async_device_actions = {
             DeviceActions.CONNECT: self.add_device,
             DeviceActions.DISCONNECT: self.del_device
@@ -436,14 +410,6 @@ class TBGatewayService:
         if self.__device_filter_config['enable'] and self.__device_filter_config.get('filterFile'):
             self.__device_filter = DeviceFilter(config_path=self._config_dir + self.__device_filter_config['filterFile']) # noqa
 
-    def init_remote_shell(self, enable):
-        self.__remote_shell = None
-        if enable:
-            log.warning("Remote shell is enabled. Please be carefully with this feature.")
-            self.__remote_shell = RemoteShell(platform=self.__updater.get_platform(),
-                                              release=self.__updater.get_release(),
-                                              logger=log) # noqa
-
     @property
     def event_storage_types(self):
         return self._event_storage_types
@@ -495,7 +461,6 @@ class TBGatewayService:
                         self.__devices_shared_attributes = {}
 
                     if (not self.tb_client.is_connected()
-                            and self.__remote_configurator is not None
                             and self.__requested_config_after_connect):
                         self.__requested_config_after_connect = False
 
@@ -558,8 +523,7 @@ class TBGatewayService:
                         self.__requested_config_after_connect = True
                         self._check_shared_attributes()
 
-                    if (cur_time - connectors_configuration_check_time > self.__config["thingsboard"].get("checkConnectorsConfigurationInSeconds", 60) * 1000 # noqa
-                            and not (self.__remote_configurator is not None and self.__remote_configurator.in_process)):
+                    if (cur_time - connectors_configuration_check_time > self.__config["thingsboard"].get("checkConnectorsConfigurationInSeconds", 60) * 1000): # noqa
                         self.check_connector_configuration_updates()
                         connectors_configuration_check_time = time() * 1000
 
@@ -633,24 +597,6 @@ class TBGatewayService:
         for logger in logging.Logger.manager.loggerDict:
             if isinstance(logger, TbLogger):
                 logger.stop()
-
-    def __init_remote_configuration(self, force=False):
-        remote_configuration_enabled = self.__config["thingsboard"].get("remoteConfiguration")
-        if not remote_configuration_enabled and force:
-            log.info("Remote configuration is enabled forcibly!")
-        if (remote_configuration_enabled or force) and self.__remote_configurator is None:
-            try:
-                self.__remote_configurator = RemoteConfigurator(self, self.__config)
-
-                while (not self.tb_client.is_connected() and not self.tb_client.client.get_subscriptions_in_progress()
-                       and not self.stopped):
-                    self.stop_event.wait(1)
-
-                self._check_shared_attributes(shared_keys=[])
-            except Exception as e:
-                log.error("Failed to initialize remote configuration: %s", e)
-        if self.__remote_configurator is not None:
-            self.__remote_configurator.send_current_configuration()
 
     @CountMessage('msgsReceivedFromPlatform')
     def _attributes_parse(self, content, *args):
@@ -777,11 +723,9 @@ class TBGatewayService:
 
     @staticmethod
     def __process_remote_configuration(new_configuration):
-        if new_configuration is not None:
-            try:
-                RemoteConfigurator.RECEIVED_UPDATE_QUEUE.put(new_configuration)
-            except Exception as e:
-                log.error("Failed to process remote configuration: %s", e)
+        # Hardened build: remote configuration disabled. Incoming payloads are dropped.
+        if new_configuration:
+            log.warning("Ignoring remote configuration payload (disabled in hardened build).")
 
     def get_config_path(self):
         return self._config_dir
@@ -789,6 +733,8 @@ class TBGatewayService:
     def subscribe_to_required_topics(self):
         if not self.__subscribed_to_rpc_topics and self.tb_client.is_connected():
             self.tb_client.client.clean_device_sub_dict()
+            # Hardened build: register no-op reject handlers so any inbound RPC is dropped
+            # without ever reaching a connector or the gateway.
             self.tb_client.client.gw_set_server_side_rpc_request_handler(self._rpc_request_handler)
             self.tb_client.client.set_server_side_rpc_request_handler(self._rpc_request_handler)
             self.tb_client.client.subscribe_to_all_attributes(self._attribute_update_callback)
@@ -978,11 +924,8 @@ class TBGatewayService:
             if connectors_persistent_keys:
                 self.__save_persistent_keys(connectors_persistent_keys)
         else:
-            log.info("Connectors - not found, waiting for remote configuration.")
-            if self.tb_client is not None and self.tb_client.is_connected():
-                self.__init_remote_configuration(force=True)
-            else:
-                self.__connectors_not_found = True
+            log.info("Connectors - not found. Hardened build: no remote configuration fallback.")
+            self.__connectors_not_found = True
 
     def connect_with_connectors(self):
         self.__connect_with_connectors()
@@ -1139,9 +1082,6 @@ class TBGatewayService:
                         if connector_config['config'].get(connector['configuration']):
                             self.__config['connectors'][index]['configurationJson'] = connector_config['config'][
                                 connector['configuration']]
-
-            if self.__remote_configurator is not None:
-                self.__remote_configurator.send_current_configuration()
 
     def send_to_storage(self, connector_name, connector_id, data: Union[dict, ConvertedData] = None):
         if data is None:
@@ -1449,10 +1389,7 @@ class TBGatewayService:
                     log = logging.getLogger('service')
                     logger_get_time = monotonic()
                 if self.tb_client.is_connected():
-                    events = []
-
-                    if self.__remote_configurator is None or not self.__remote_configurator.in_process:
-                        events = self._event_storage.get_event_pack()
+                    events = self._event_storage.get_event_pack()
 
                     if events:
                         events_len = len(events)
@@ -1538,8 +1475,7 @@ class TBGatewayService:
                             self.__send_data(devices_data_in_event_pack) # noqa
                             current_event_pack_data_size = 0
 
-                        if self.tb_client.is_connected() and (
-                                self.__remote_configurator is None or not self.__remote_configurator.in_process):
+                        if self.tb_client.is_connected():
 
                             success = self.__handle_published_events()
 
@@ -1575,8 +1511,7 @@ class TBGatewayService:
 
         futures = []
         try:
-            if self.tb_client.is_connected() and (self.__remote_configurator is None or
-                                                  not self.__remote_configurator.in_process):
+            if self.tb_client.is_connected():
                 qos = self.tb_client.client.quality_of_service
                 if qos == 1:
                     futures = list(self.__messages_confirmation_executor.map(self.__process_published_event, events))
@@ -1634,140 +1569,31 @@ class TBGatewayService:
 
     @CountMessage('msgsReceivedFromPlatform')
     def _rpc_request_handler(self, request_id, content):
+        # Hardened build: all inbound RPCs are rejected. Defense-in-depth - the gateway
+        # registers this handler so any RPC the platform attempts to deliver is dropped
+        # with a 403 reply and never forwarded to connectors or executed locally.
         try:
-            if not isinstance(request_id, int) and 'data' in content:
+            if not isinstance(request_id, int) and isinstance(content, dict) and 'data' in content:
                 request_id = content['data'].get('id')
-            device = content.get("device")
-            if device is not None:
-                self.__rpc_to_devices_queue.put((request_id, content, monotonic()))
-            else:
-                try:
-                    method_split = content["method"].split('_')
-                    module = None
-                    if len(method_split) > 0:
-                        module = method_split[0]
-                    if module is not None:
-                        result = None
-                        if self.connectors_configs.get(module):
-                            log.debug("Connector \"%s\" for RPC request \"%s\" found", module, content["method"])
-                            for connector_name in self.available_connectors_by_name:
-                                if self.available_connectors_by_name[connector_name]._connector_type == module: # noqa pylint: disable=protected-access
-                                    log.debug("Sending command RPC %s to connector %s", content["method"],
-                                              connector_name)
-                                    content['id'] = request_id
-                                    result = self.available_connectors_by_name[connector_name].server_side_rpc_handler(content) # noqa E501
-                        elif module == 'gateway' or (self.__remote_shell and module in self.__remote_shell.shell_commands): # noqa
-                            result = self.__rpc_gateway_processing(request_id, content)
-                        else:
-                            log.error("Connector \"%s\" not found", module)
-                            result = {"error": "%s - connector not found in available connectors." % module,
-                                      "code": 404}
-                        if result is None:
-                            self.send_rpc_reply(None, request_id, success_sent=False)
-                        elif isinstance(result, dict) and "qos" in result:
-                            self.send_rpc_reply(None, request_id,
-                                                dumps({k: v for k, v in result.items() if k != "qos"}),
-                                                quality_of_service=result["qos"])
-                        else:
-                            self.send_rpc_reply(None, request_id, dumps(result))
-                except Exception as e:
-                    self.send_rpc_reply(None, request_id, "{\"error\":\"%s\", \"code\": 500}" % str(e))
-                    log.error("Error while processing RPC request to service", exc_info=e)
+            method = content.get("method") if isinstance(content, dict) else None
+            device = content.get("device") if isinstance(content, dict) else None
+            log.warning("Rejecting inbound RPC (hardened build). device=%s method=%s id=%s",
+                        device, method, request_id)
+            try:
+                reply = "{\"error\":\"RPCs are disabled in hardened build\", \"code\": 403}"
+                if device is not None:
+                    self.send_rpc_reply(device, request_id, reply, success_sent=False)
+                else:
+                    self.send_rpc_reply(None, request_id, reply)
+            except Exception:
+                pass
         except Exception as e:
-            log.error("Error while processing RPC request", exc_info=e)
+            log.error("Error while rejecting RPC request", exc_info=e)
 
     def __rpc_to_devices_processing(self):
+        # Hardened build: queue is never populated. Thread idles until shutdown.
         while not self.stopped:
-            try:
-                request_id, content, received_time = self.__rpc_to_devices_queue.get_nowait()
-                timeout = content.get("params", {}).get("timeout", self.DEFAULT_TIMEOUT)
-                if monotonic() - received_time > timeout:
-                    log.error("RPC request %s timeout", request_id)
-                    self.send_rpc_reply(content["device"], request_id, "{\"error\":\"Request timeout\", \"code\": 408}")
-                    continue
-                device = content.get("device")
-                original_name = TBUtility.get_dict_key_by_value(self.__renamed_devices, device)
-                if original_name is not None:
-                    content['device'] = original_name
-                    device = original_name
-                if device in self.get_devices():
-                    connector = self.get_devices()[content['device']].get(CONNECTOR_PARAMETER)
-                    if connector is not None:
-                        content['id'] = request_id
-                        result = connector.server_side_rpc_handler(content)
-                        if result is not None and isinstance(result, dict) and 'error' in result:
-                            self.send_rpc_reply(device, request_id, dumps(result), success_sent=False)
-                    else:
-                        log.error("Received RPC request but connector for the device %s not found. Request data: \n %s",
-                                  content["device"],
-                                  dumps(content))
-                else:
-                    self.__rpc_to_devices_queue.put((request_id, content, received_time))
-            except (TimeoutError, Empty):
-                self.stop_event.wait(.1)
-
-    def __rpc_gateway_processing(self, request_id, content):
-        log.info("Received RPC request to the gateway, id: %s, method: %s", str(request_id), content["method"])
-        arguments = content.get('params', {})
-        method_to_call = content["method"].replace("gateway_", "")
-
-        if self.__remote_shell is not None:
-            method_function = self.__remote_shell.shell_commands.get(method_to_call,
-                                                                     self.__gateway_rpc_methods.get(method_to_call))
-        else:
-            method_function = self.__gateway_rpc_methods.get(method_to_call)
-
-        if method_function is None and method_to_call in self.__rpc_scheduled_methods_functions:
-            seconds_to_restart = arguments * 1000 if arguments and arguments != '{}' else 1000
-            seconds_to_restart = max(seconds_to_restart, 1000)
-            self.__scheduled_rpc_calls.append([time() * 1000 + seconds_to_restart,
-                                               self.__rpc_scheduled_methods_functions[method_to_call]])
-            log.info("Gateway %s scheduled in %i seconds", method_to_call, seconds_to_restart / 1000)
-            result = {"success": True}
-        elif method_function is None:
-            log.error("RPC method %s - Not found", content["method"])
-            return {"error": "Method not found", "code": 404}
-        elif isinstance(arguments, list):
-            result = method_function(*arguments)
-        elif arguments == '{}' or arguments is None:
-            result = method_function()
-        else:
-            result = method_function(arguments)
-
-        return result
-
-    @staticmethod
-    def __rpc_ping(*args):
-        log.debug("Ping RPC request received with arguments %s", args)
-        return {"code": 200, "resp": "pong"}
-
-    def __rpc_devices(self, *args):
-        log.debug("Devices RPC request received with arguments %s", args)
-        data_to_send = {}
-        for device in self.__connected_devices:
-            if self.__connected_devices[device][CONNECTOR_PARAMETER] is not None:
-                data_to_send[device] = self.__connected_devices[device][CONNECTOR_PARAMETER].get_name()
-        return {"code": 200, "resp": data_to_send}
-
-    def __rpc_update(self, *args):
-        log.debug("Update RPC request received with arguments %s", args)
-        try:
-            result = {"resp": self.__updater.update(),
-                      "code": 200,
-                      }
-        except Exception as e:
-            result = {"error": str(e),
-                      "code": 500
-                      }
-        return result
-
-    def __rpc_version(self, *args):
-        log.debug("Version RPC request received with arguments %s", args)
-        try:
-            result = {"resp": self.__updater.get_version(), "code": 200}
-        except Exception as e:
-            result = {"error": str(e), "code": 500}
-        return result
+            self.stop_event.wait(1)
 
     def is_rpc_in_progress(self, topic):
         return topic in self.__rpc_requests_in_progress
@@ -2352,36 +2178,6 @@ class TBGatewayService:
 
     def is_latency_metrics_enabled(self):
         return self.__latency_debug_mode
-
-    # custom rpc method ---------------
-    def load_custom_rpc_methods(self, folder_path):
-        """
-        Dynamically load custom RPC methods from the specified folder.
-        """
-        if not os.path.exists(folder_path):
-            return
-
-        for filename in os.listdir(folder_path):
-            if filename.endswith(".py"):
-                module_name = filename[:-3]
-                module_path = os.path.join(folder_path, filename)
-                self.import_custom_rpc_methods(module_name, module_path)
-
-    def import_custom_rpc_methods(self, module_name, module_path):
-        """
-        Import custom RPC methods from a given Python file.
-        """
-        spec = spec_from_file_location(module_name, module_path)
-        custom_module = module_from_spec(spec)
-        spec.loader.exec_module(custom_module)
-
-        # Iterate through the attributes of the module
-        for attr_name in dir(custom_module):
-            attr = getattr(custom_module, attr_name)
-            # Check if the attribute is a function
-            if callable(attr):
-                # Add the method to the __gateway_rpc_methods dictionary
-                self.__gateway_rpc_methods[attr_name.replace("__rpc_", "")] = attr.__get__(self)
 
 
 if __name__ == '__main__':
