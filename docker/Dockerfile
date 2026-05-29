@@ -2,36 +2,25 @@
 # Hardened thingsboard-gateway image: BACnet-only, no RemoteShell, no RemoteConfig, no inbound RPCs.
 
 # --- Stage 1: builder -------------------------------------------------------
-FROM python:3.14-slim-bookworm AS builder
+FROM python:3.14-alpine AS builder
 
-ARG TARGETPLATFORM
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_ROOT_USER_ACTION=ignore
 
 WORKDIR /build
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        build-essential gcc python3-dev libssl-dev libffi-dev zlib1g-dev pkg-config curl ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
-
-# Rust toolchain (needed for cryptography / orjson native builds on non-amd64).
-RUN case "${TARGETPLATFORM:-linux/amd64}" in \
-        "linux/amd64") DEFAULT_HOST="x86_64-unknown-linux-gnu";; \
-        "linux/arm64") DEFAULT_HOST="aarch64-unknown-linux-gnu";; \
-        "linux/arm/v7") DEFAULT_HOST="armv7-unknown-linux-gnueabihf";; \
-        *) DEFAULT_HOST="x86_64-unknown-linux-gnu";; \
-    esac \
-    && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-        | sh -s -- -y --default-host="$DEFAULT_HOST" --profile minimal
-ENV PATH="/root/.cargo/bin:${PATH}"
+# Build deps for native wheels (cryptography, orjson, mmh3) on musl.
+RUN apk add --no-cache \
+        build-base gcc python3-dev musl-dev libffi-dev openssl-dev zlib-dev \
+        pkgconf rust cargo
 
 COPY requirements.txt /build/requirements.txt
 RUN pip install --upgrade pip setuptools wheel \
     && pip wheel --wheel-dir /wheels -r requirements.txt
 
 # --- Stage 2: runtime -------------------------------------------------------
-FROM python:3.14-slim-bookworm AS runtime
+FROM python:3.14-alpine AS runtime
 
 ARG APP_UID=10001
 ARG APP_GID=10001
@@ -50,15 +39,14 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_NO_CACHE_DIR=1 \
     TB_GW_HARDENED=1 \
+    PYTHONPATH=/ \
     configs="/thingsboard_gateway/config" \
     extensions="/thingsboard_gateway/extensions" \
     logs="/thingsboard_gateway/logs"
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        tini ca-certificates \
-    && rm -rf /var/lib/apt/lists/* \
-    && groupadd --system --gid "${APP_GID}" tbgw \
-    && useradd  --system --uid "${APP_UID}" --gid tbgw --home-dir /thingsboard_gateway --shell /usr/sbin/nologin tbgw
+RUN apk add --no-cache tini ca-certificates libffi openssl \
+    && addgroup -S -g "${APP_GID}" tbgw \
+    && adduser  -S -u "${APP_UID}" -G tbgw -h /thingsboard_gateway -s /sbin/nologin tbgw
 
 WORKDIR /thingsboard_gateway
 
@@ -85,5 +73,5 @@ VOLUME ["/thingsboard_gateway/config", "/thingsboard_gateway/extensions", "/thin
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
     CMD python -c "import socket,os; socket.create_connection((os.environ.get('TB_GW_HOST','127.0.0.1'), int(os.environ.get('TB_GW_PORT','1883'))), 5)" || exit 1
 
-ENTRYPOINT ["/usr/bin/tini", "--"]
+ENTRYPOINT ["/sbin/tini", "--"]
 CMD ["/bin/sh", "/start-gateway.sh"]
