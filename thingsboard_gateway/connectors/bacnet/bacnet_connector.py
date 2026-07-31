@@ -855,6 +855,15 @@ class AsyncBACnetConnector(Thread, Connector):
 
             if property_id == "weeklySchedule":
                 ref_list = await self.__application.read_property(address, object_id, "listOfObjectPropertyReferences")
+                if not ref_list or ref_list[0] is None:
+                    self.__log.error('Cannot write weeklySchedule for object %s on device %s: '
+                                     'listOfObjectPropertyReferences is empty or missing. '
+                                     'The schedule has no configured target object property whose value it can control.',
+                                     object_id, address)
+                    return {
+                        'error': ('Cannot write weeklySchedule: '
+                                  'listOfObjectPropertyReferences is empty or missing.')
+                    }
                 ref_object: ObjectPropertyReference = ref_list[0]
                 ref_object_id: ObjectIdentifier = ref_object.objectIdentifier
                 ref_pv: PropertyIdentifier = await self.__application.read_property(address, ref_object_id, "presentValue")
