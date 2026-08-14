@@ -324,6 +324,21 @@ class Application(NormalApplication, ForeignApplication):
 
         return device_name
 
+    async def write_array_property(self, address, object_id, property_id, elements, priority=None):
+        """Write a BACnetARRAY one element at a time.
+
+        A full weekly schedule easily exceeds the maximum APDU size, so each
+        element is written individually rather than as one request. Element 1
+        is the first entry, since index 0 addresses the array length.
+        """
+        self.__log.debug("Writing %s.%s element-wise (%d elements)",
+                         object_id, property_id, len(elements))
+
+        for array_index, element in enumerate(elements, start=1):
+            await self.write_property(address, object_id, property_id, element,
+                                      array_index=array_index, priority=priority)
+            self.__log.debug("Wrote %s.%s[%d]", object_id, property_id, array_index)
+
     async def probe_device_properties(self, address: Address, object_id, property_names: list,
                                        timeout: float = 10.0) -> dict:
         """

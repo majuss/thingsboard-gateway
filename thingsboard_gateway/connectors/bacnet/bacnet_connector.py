@@ -874,7 +874,15 @@ class AsyncBACnetConnector(Thread, Connector):
             if property_id == "listOfObjectPropertyReferences":
                 value = await self.__prepare_list_of_object_property_references_value(value, property_id)
 
-            await self.__application.write_property(address, object_id, property_id, value, priority=priority)
+            if property_id == "weeklySchedule":
+                # A weekly schedule is a BACnetARRAY[7] and is written day by
+                # day: as a single request it easily exceeds the maximum APDU.
+                await self.__application.write_array_property(address, object_id, property_id, value,
+                                                              priority=priority)
+            else:
+                await self.__application.write_property(address, object_id, property_id, value,
+                                                        priority=priority)
+
             result['value'] = value
             return result
 
