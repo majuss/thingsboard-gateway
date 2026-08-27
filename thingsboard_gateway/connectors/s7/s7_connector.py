@@ -13,6 +13,7 @@
 #     limitations under the License.
 
 from time import monotonic, sleep
+import re
 import asyncio
 from random import choice
 from string import ascii_lowercase
@@ -20,6 +21,23 @@ from threading import Thread
 from packaging import version
 
 from thingsboard_gateway.connectors.connector import Connector
+from thingsboard_gateway.connectors.s7.constants import (
+    RESERVED_GET_RPC_SCHEMA,
+    RESERVED_SET_RPC_SCHEMA,
+    RESERVED_GET_TAG_RPC_SCHEMA,
+    RESERVED_SET_TAG_RPC_SCHEMA,
+    RESERVED_GET_TAG_RPC_PATTERN,
+    RESERVED_SET_TAG_RPC_PATTERN,
+    RESERVED_GET_DATA_RPC_SCHEMA,
+    RESERVED_SET_DATA_RPC_SCHEMA,
+    RESERVED_GET_DATA_RPC_PATTERN,
+    RESERVED_SET_DATA_RPC_PATTERN,
+    RESERVED_GET_VM_RPC_SCHEMA,
+    RESERVED_SET_VM_RPC_SCHEMA,
+    RESERVED_GET_VM_RPC_PATTERN,
+    RESERVED_SET_VM_RPC_PATTERN,
+    RESERVED_RPC_TYPE_PATTERN,
+)
 from thingsboard_gateway.gateway.constants import (
     STATISTIC_MESSAGE_RECEIVED_PARAMETER,
     STATISTIC_MESSAGE_SENT_PARAMETER,
@@ -55,6 +73,26 @@ from thingsboard_gateway.connectors.s7.entities.device_configs import (  # noqa:
 
 
 class S7Connector(Thread, Connector):
+    _RESERVED_RPC_TYPE_PATTERN = re.compile(RESERVED_RPC_TYPE_PATTERN)
+
+    _RESERVED_RPC_PATTERNS_BY_TYPE_AND_METHOD = {
+        ('tag', 'get'): re.compile(RESERVED_GET_TAG_RPC_PATTERN),
+        ('tag', 'set'): re.compile(RESERVED_SET_TAG_RPC_PATTERN),
+        ('data', 'get'): re.compile(RESERVED_GET_DATA_RPC_PATTERN),
+        ('data', 'set'): re.compile(RESERVED_SET_DATA_RPC_PATTERN),
+        ('vm', 'get'): re.compile(RESERVED_GET_VM_RPC_PATTERN),
+        ('vm', 'set'): re.compile(RESERVED_SET_VM_RPC_PATTERN),
+    }
+    
+    _RESERVED_RPC_SCHEMAS_BY_TYPE_AND_METHOD = {
+            ('tag', 'get'): RESERVED_GET_TAG_RPC_SCHEMA,
+            ('tag', 'set'): RESERVED_SET_TAG_RPC_SCHEMA,
+            ('data', 'get'): RESERVED_GET_DATA_RPC_SCHEMA,
+            ('data', 'set'): RESERVED_SET_DATA_RPC_SCHEMA,
+            ('vm', 'get'): RESERVED_GET_VM_RPC_SCHEMA,
+            ('vm', 'set'): RESERVED_SET_VM_RPC_SCHEMA,
+        }
+
     def __init__(self, gateway, config, connector_type) -> None:
         self.statistics = {
             STATISTIC_MESSAGE_RECEIVED_PARAMETER: 0,
@@ -313,6 +351,10 @@ class S7Connector(Thread, Connector):
                     device.config.device_name, content.get('data', {}).get('id'), error_msg)
                 return
 
+            if rpc_method_name in ('get', 'set'):
+                self._process_reserved_rpc(rpc_method_name, content, device)
+                return
+
             filtered_rpc_section_from_config = [rpc_config for rpc_config in device.config.server_side_rpc if
                                                 rpc_config['method'] == rpc_method_name]
             if not filtered_rpc_section_from_config:
@@ -344,6 +386,69 @@ class S7Connector(Thread, Connector):
             error_msg = f"Unsupported requestType {rpc_config.get('requestType')} for RPC method {rpc_method_name}"
             self._send_error_rpc_reply(
                 device.config.device_name, content.get('data', {}).get('id'), error_msg)
+
+    def _process_reserved_rpc(self, rpc_method_name, content, device):
+        request_id = content.get('data', {}).get('id')
+        params_section = content.get('data', {}).get('params')
+
+        if not params_section:
+            self._send_error_rpc_reply(
+                device.config.device_name, request_id,
+                f"No 'params' found in reserved RPC request '{rpc_method_name}'")
+            return
+
+        type_match = self._RESERVED_RPC_TYPE_PATTERN.match(params_section)
+        if type_match is None:
+            self._reply_reserved_rpc_schema_mismatch(rpc_method_name, request_id, device)
+            return
+
+        address_type = type_match.group('type')
+        pattern = self._RESERVED_RPC_PATTERNS_BY_TYPE_AND_METHOD[(address_type, rpc_method_name)]
+
+        match = pattern.match(params_section)
+        if match is None:
+            self._reply_reserved_rpc_schema_mismatch(rpc_method_name, request_id, device, address_type)
+            return
+
+        rpc_config = self._build_reserved_rpc_config(address_type, rpc_method_name, match.groupdict())
+
+        if rpc_method_name == 'set':
+            content = {**content, 'data': {**content['data'], 'params': match.group('value')}}
+
+        self._process_rpc(rpc_method_name, rpc_config, content, device)
+
+    def _reply_reserved_rpc_schema_mismatch(self, rpc_method_name, request_id, device, address_type=None):
+        if address_type is None:
+            expected_schema = RESERVED_SET_RPC_SCHEMA if rpc_method_name == 'set' else RESERVED_GET_RPC_SCHEMA
+        else:
+            expected_schema = self._RESERVED_RPC_SCHEMAS_BY_TYPE_AND_METHOD[(address_type, rpc_method_name)]
+
+        self.__log.error(f"The requested RPC does not match with the schema: {expected_schema}")
+        reply_content = {"result": {"error": f"The requested RPC does not match with the schema: {expected_schema}"}}
+        self.__gateway.send_rpc_reply(device=device.config.device_name,
+                                      req_id=request_id,
+                                      content=reply_content)
+
+    @staticmethod
+    def _build_reserved_rpc_config(address_type, rpc_method_name, groups):
+        rpc_config = {'type': address_type, 'requestType': 'write' if rpc_method_name == 'set' else 'read'}
+
+        if address_type == 'tag':
+            rpc_config['tag'] = groups['tag']
+        elif address_type == 'vm':
+            rpc_config['vmAddress'] = groups['vmAddress']
+        elif address_type == 'data':
+            rpc_config['dbNumber'] = int(groups['dbNumber'])
+            rpc_config['start'] = int(groups['start'])
+            rpc_config['dataType'] = groups['dataType']
+            if groups.get('size') is not None:
+                rpc_config['size'] = int(groups['size'])
+            if groups.get('bit') is not None:
+                rpc_config['bit'] = int(groups['bit'])
+        else:
+            raise ValueError(f"Reserved RPC 'type' must be 'tag', 'data' or 'vm', but got '{address_type}'")
+
+        return rpc_config
 
     def _process_write_rpc(self, rpc_method_name, rpc_config, content, device):
         value = content.get('data', {}).get('params')
