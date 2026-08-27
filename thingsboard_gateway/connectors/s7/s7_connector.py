@@ -83,7 +83,7 @@ class S7Connector(Thread, Connector):
         ('vm', 'get'): re.compile(RESERVED_GET_VM_RPC_PATTERN),
         ('vm', 'set'): re.compile(RESERVED_SET_VM_RPC_PATTERN),
     }
-    
+
     _RESERVED_RPC_SCHEMAS_BY_TYPE_AND_METHOD = {
             ('tag', 'get'): RESERVED_GET_TAG_RPC_SCHEMA,
             ('tag', 'set'): RESERVED_SET_TAG_RPC_SCHEMA,

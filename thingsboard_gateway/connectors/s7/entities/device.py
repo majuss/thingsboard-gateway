@@ -47,7 +47,6 @@ class Device:
         self.uplink_converter = self._load_converter(UPLINK_PREFIX, converter_logger)
         self.downlink_converter = self._load_converter(DOWNLINK_PREFIX, converter_logger)
 
-
     def _load_converter(self, converter_type: str, converter_logger):
         try:
             config_attr = converter_type + '_converter_config'
