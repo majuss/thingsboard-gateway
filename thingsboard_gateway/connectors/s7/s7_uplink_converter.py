@@ -14,7 +14,7 @@
 
 import re
 from time import time
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta, date, timezone
 import struct
 
 import snap7
@@ -196,7 +196,7 @@ class S7UplinkConverter(S7Converter):
         elif data_type in ("ldt", "date_and_ltime"):
             # LDT is 64-bit signed int (nanoseconds since 1970-01-01 00:00:00 UTC)
             ns = struct.unpack_from(">q", value, offset)[0]
-            dt_val = datetime.utcfromtimestamp(ns / 1_000_000_000.0)
+            dt_val = datetime.fromtimestamp(ns / 1_000_000_000.0, tz=timezone.utc)
             return dt_val.isoformat()
 
         elif data_type == "dtl":
