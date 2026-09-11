@@ -18,6 +18,7 @@ import asyncio
 from asyncio import Queue, CancelledError, QueueEmpty
 from copy import deepcopy
 from datetime import time
+from json import dumps
 from threading import Thread
 from string import ascii_lowercase
 from random import choice
@@ -60,6 +61,11 @@ from thingsboard_gateway.connectors.bacnet.backward_compatibility_adapter import
 
 if TYPE_CHECKING:
     from thingsboard_gateway.gateway.tb_gateway_service import TBGatewayService
+
+# Upper bound for the exponential backoff applied to devices that fail property probing.
+UNREACHABLE_DEVICE_MAX_BACKOFF = 1800
+# BACnet addresses may carry a network prefix and a port, e.g. "3:10.3.93.5:47808".
+IPV4_IN_ADDRESS = compile(r'\d{1,3}(?:\.\d{1,3}){3}')
 
 
 class AsyncBACnetConnector(Thread, Connector):
@@ -124,6 +130,9 @@ class AsyncBACnetConnector(Thread, Connector):
         self.__active_reads = 0
         self.__poll_cycle_start = 0
         self.__devices_rescan_objects_period = self.__config['application'].get('devicesRescanObjectsPeriodSeconds', 60)
+        # unique device id -> {'ip', 'device_id', 'failures', 'retry_at'} for devices failing the probe
+        self.__unreachable_devices = {}
+        self.__reported_unreachable = None
 
     def __parse_ede_config(self):
         try:
@@ -551,6 +560,32 @@ class AsyncBACnetConnector(Thread, Connector):
             self.__log.error('Error during device discovery: %s', e)
         finally:
             self.__discovery_in_progress = False
+            self.__report_unreachable_devices()
+
+    def __report_unreachable_devices(self):
+        snapshot = sorted(({'ip': entry['ip'],
+                            'deviceId': entry['device_id'],
+                            'failures': entry['failures']}
+                           for entry in self.__unreachable_devices.values()),
+                          key=lambda item: item['deviceId'])
+
+        if snapshot == self.__reported_unreachable:
+            return
+
+        # send_telemetry blocks until the platform connection is up - never call it
+        # from this coroutine while disconnected, it would stall the connector loop.
+        tb_client = getattr(self.__gateway, 'tb_client', None)
+        if tb_client is None or not tb_client.is_connected():
+            return
+
+        try:
+            self.__gateway.send_telemetry({
+                self.name + '_UNREACHABLE_DEVICES': dumps(snapshot),
+                self.name + '_UNREACHABLE_COUNT': len(snapshot)
+            })
+            self.__reported_unreachable = snapshot
+        except Exception as e:
+            self.__log.error('Failed to report unreachable devices: %s', e)
 
     async def __discover_devices(self):
         self.__previous_discover_time = monotonic()
@@ -607,9 +642,31 @@ class AsyncBACnetConnector(Thread, Connector):
         if len(await self.__devices.get_devices_by_id(device_unique_id)) > 0:
             return
 
+        tracked = self.__unreachable_devices.get(device_unique_id)
+        if tracked and monotonic() < tracked['retry_at']:
+            return
+
         apdu = await self.__build_i_am_like_apdu(address, device_id, device_config)
         if apdu is None:
+            failures = (tracked['failures'] if tracked else 0) + 1
+            backoff = min(self.__devices_discover_period * 2 ** (failures - 1),
+                          UNREACHABLE_DEVICE_MAX_BACKOFF)
+            ipv4 = IPV4_IN_ADDRESS.search(configured_address)
+            self.__unreachable_devices[device_unique_id] = {
+                'ip': ipv4.group(0) if ipv4 else configured_address,
+                'device_id': device_id,
+                'failures': failures,
+                'retry_at': monotonic() + backoff
+            }
+            self.__log.warning('Device %s (deviceId=%s) did not answer the property probe '
+                               '(attempt %d), skipping it for %d seconds',
+                               configured_address, device_id, failures, backoff)
             return
+
+        if tracked:
+            self.__log.info('Device %s (deviceId=%s) is reachable again after %d failed attempts',
+                            configured_address, device_id, tracked['failures'])
+            self.__unreachable_devices.pop(device_unique_id, None)
 
         self.__log.debug('Adding configured BACnet device by synthetic I-Am: %s (deviceId=%s)',
                          configured_address,
@@ -646,30 +703,30 @@ class AsyncBACnetConnector(Thread, Connector):
         if segmentation_from_config is None:
             properties_to_probe.append('segmentationSupported')
 
-        probe_succeeded = False
+        # Probe at least one property even when the config supplies every value: it is the
+        # only proof of life we get without discovery. A device that answers nothing here
+        # will not answer data reads either, and adding it anyway costs a full APDU timeout
+        # for every chunk on every poll cycle.
+        probed_values = await self.__application.probe_device_properties(
+            address, object_id, properties_to_probe or ['objectName']
+        )
 
-        if properties_to_probe:
-            probed_values = await self.__application.probe_device_properties(
-                address, object_id, properties_to_probe
+        if not probed_values:
+            self.__log.warning('Device %s (deviceId=%s) did not answer the property probe, '
+                               'not adding it - it would only produce read timeouts',
+                               address, device_id)
+            return None
+
+        if 'objectName' in probed_values and device_name_from_config is None:
+            device_name = str(probed_values['objectName'])
+        if 'vendorIdentifier' in probed_values:
+            vendor_id = int(probed_values['vendorIdentifier'])
+        if 'maxApduLengthAccepted' in probed_values:
+            max_apdu_length = int(probed_values['maxApduLengthAccepted'])
+        if 'segmentationSupported' in probed_values:
+            segmentation_supported = self.__parse_segmentation_or_default(
+                probed_values['segmentationSupported'], segmentation_supported
             )
-
-            if probed_values:
-                probe_succeeded = True
-
-                if 'objectName' in probed_values:
-                    device_name = str(probed_values['objectName'])
-                if 'vendorIdentifier' in probed_values:
-                    vendor_id = int(probed_values['vendorIdentifier'])
-                if 'maxApduLengthAccepted' in probed_values:
-                    max_apdu_length = int(probed_values['maxApduLengthAccepted'])
-                if 'segmentationSupported' in probed_values:
-                    segmentation_supported = self.__parse_segmentation_or_default(
-                        probed_values['segmentationSupported'], segmentation_supported
-                    )
-
-        if not probe_succeeded:
-            self.__log.debug('Device %s (deviceId=%s) is being added from config defaults without discovery response',
-                             address, device_id)
 
         return SimpleNamespace(
             pduSource=address,
