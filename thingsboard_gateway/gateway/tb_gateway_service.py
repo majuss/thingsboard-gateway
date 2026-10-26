@@ -635,11 +635,13 @@ class TBGatewayService:
         self.__process_remote_logging_update(shared_attributes.get('RemoteLoggingLevel'))
         self.__process_remote_configuration(shared_attributes)
 
-    def __process_remote_logging_update(self, remote_logging_level):
+    @staticmethod
+    def __process_remote_logging_update(remote_logging_level):
+        # Hardened build: remote logging cannot be enabled from the platform. The RemoteLoggingLevel
+        # shared attribute persists on the platform and would be re-applied on every reconnect.
         if remote_logging_level is not None:
-            remote_logging_level_id = TBRemoteLoggerHandler.get_logger_level_id(remote_logging_level.upper())
-            self.remote_handler.activate_remote_logging_for_level(remote_logging_level_id)
-            log.info('Remote logging level set to: %s ', remote_logging_level)
+            log.warning("Ignoring RemoteLoggingLevel=%r from platform (disabled in hardened build).",
+                        remote_logging_level)
 
     def __process_remote_converter_configuration_update(self, content: dict):
         try:

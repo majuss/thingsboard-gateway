@@ -102,6 +102,9 @@ class TBRemoteLoggerHandler(logging.Handler):
                         if logs_msg_size > self.__gateway.get_max_payload_size_bytes():
                             print(f'Too big LOG message size to send ({logs_msg_size}). Skipping...')
                             print(log_msg)
+                            # Drop the message; retrying it would spin forever on the same oversized record.
+                            log_msg = None
+                            count += 1
                             continue
 
                         if TBUtility.get_data_size(logs_for_sending_list) + logs_msg_size > self.__gateway.get_max_payload_size_bytes(): # noqa
