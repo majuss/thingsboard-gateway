@@ -57,6 +57,24 @@ except ImportError:
 tb_device_mqtt.DEFAULT_TIMEOUT = 3
 
 
+class HardenedTBGatewayMqttClient(TBGatewayMqttClient):
+    """Hardened build: the OTA firmware logic of tb-mqtt-client is disabled.
+
+    The library starts a firmware download from the MQTT network-loop thread whenever fw_* shared
+    attributes arrive for the gateway device (sleeping there and raising KeyError on incomplete
+    attributes, which kills the loop). Pinning firmware_info to an empty dict means that trigger never
+    fires; regular attribute callbacks are unaffected.
+    """
+
+    @property
+    def firmware_info(self):
+        return {}
+
+    @firmware_info.setter
+    def firmware_info(self, _value):
+        pass
+
+
 class TBClient(threading.Thread):
     def __init__(self, config, config_folder_path, logger):
         self.__logger = logger
@@ -238,11 +256,11 @@ class TBClient(threading.Thread):
         rate_limits_config = self.__get_rate_limit_config()
 
         if rate_limits_config:
-            self.client = TBGatewayMqttClient(self.__host, self.__port, self.__username, self.__password, self,
+            self.client = HardenedTBGatewayMqttClient(self.__host, self.__port, self.__username, self.__password, self,
                                               quality_of_service=self.__default_quality_of_service,
                                               client_id=self.__client_id, **rate_limits_config)
         else:
-            self.client = TBGatewayMqttClient(self.__host, self.__port, self.__username, self.__password, self,
+            self.client = HardenedTBGatewayMqttClient(self.__host, self.__port, self.__username, self.__password, self,
                                               quality_of_service=self.__default_quality_of_service,
                                               client_id=self.__client_id)
 
