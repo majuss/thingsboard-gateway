@@ -46,8 +46,6 @@ from thingsboard_gateway.gateway.device_filter import DeviceFilter
 from thingsboard_gateway.gateway.entities.converted_data import ConvertedData
 from thingsboard_gateway.gateway.entities.datapoint_key import DatapointKey
 from thingsboard_gateway.gateway.entities.report_strategy_config import ReportStrategyConfig
-from thingsboard_gateway.gateway.entities.rpc_request import create_rpc_request_from_dict, RPCType
-from thingsboard_gateway.gateway.entities.rpc_response import RPCResponse
 from thingsboard_gateway.gateway.report_strategy.report_strategy_service import ReportStrategyService
 from thingsboard_gateway.gateway.shell.proxy import AutoProxy
 from thingsboard_gateway.gateway.statistics.decorators import CountMessage, CollectStorageEventsStatistics, \
@@ -1594,24 +1592,6 @@ class TBGatewayService:
                 pass
         except Exception as e:
             log.error("Error while rejecting RPC request", exc_info=e)
-
-    def _process_rpc_to_connector(self, rpc_request):
-        found_connectors = self.find_connectors_by_type(rpc_request.connector_type)
-        if not found_connectors:
-            log.error("Received RPC request but connector of type %s not found. Request data: \n %s",
-                      rpc_request.connector_type,
-                      dumps(rpc_request))
-            return f"{{\"error\":\"Connector of type {rpc_request.connector_type} not found\", \"code\": 404}}"
-
-        for connector in found_connectors:
-            return connector.server_side_rpc_handler(rpc_request)
-
-    def find_connectors_by_type(self, connector_type):
-        connectors = []
-        for connector_name in self.available_connectors_by_name:
-            if self.available_connectors_by_name[connector_name].get_type() == connector_type:
-                connectors.append(self.available_connectors_by_name[connector_name])
-        return connectors
 
     def __rpc_to_devices_processing(self):
         # Hardened build: queue is never populated. Thread idles until shutdown.
